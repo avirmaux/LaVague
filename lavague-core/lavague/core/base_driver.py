@@ -64,7 +64,7 @@ class BaseDriver(ABC):
         pass
 
     @abstractmethod
-    def resize_driver(driver, width, height):
+    def resize_driver(self, driver, width, height):
         """
         Resize the driver to a targeted height and width.
         """
@@ -281,11 +281,15 @@ class BaseDriver(ABC):
 
     def get_current_screenshot_folder(self) -> Path:
         url = self.get_url()
+        win = self.driver.current_window_handle
 
         if url is None:
             url = "blank"
 
-        screenshots_path = Path("./screenshots")
+        screenshots_top_path = Path(f"./screenshots")
+        screenshots_top_path.mkdir(exist_ok=True)
+
+        screenshots_path = Path(f"./screenshots/screenshots_{win}")
         screenshots_path.mkdir(exist_ok=True)
 
         current_url = url.replace("://", "_").replace("/", "_")
@@ -374,6 +378,36 @@ class BaseDriver(ABC):
             color,
             label,
         )
+
+    def list_windows(self):
+        return self.driver.window_handles
+
+    def len_windows(self):
+        return len(self.list_windows())
+
+    def switch_to_window(self, win_name: str):
+        """"Switch to window of name `win_name`"""
+        self.driver.switch_to.window(win_name)
+
+    def current_window(self):
+        return self.driver.current_window_handle
+
+    def close_window(self):
+        self.driver.close()
+
+    def create_new_window(self):
+        self.driver.driver.switch_to.new_window("window")
+
+    def set_title(self, title):
+        self.driver.driver.execute_script(f'document.title = "{title}"')
+
+    def close_all_other_windows(self):
+        current_window = self.current_window()
+        for window in self.list_windows():
+            if window != current_window:
+                self.switch_to_window(window)
+                self.close_window()
+        self.switch_to_window(current_window)
 
 
 class DOMNode(ABC):

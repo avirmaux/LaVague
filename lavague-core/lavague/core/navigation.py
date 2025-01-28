@@ -1,7 +1,9 @@
 from io import BytesIO
 import logging
 import time
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union, NewType
+from enum import Enum
+
 from lavague.core.action_template import ActionTemplate
 from lavague.core.context import Context, get_default_context
 from lavague.core.exceptions import NavigationException
@@ -25,6 +27,22 @@ from PIL import Image
 from llama_index.core.base.llms.base import BaseLLM
 from llama_index.core.embeddings import BaseEmbedding
 from lavague.core.utilities.profiling import time_profiler
+
+
+NAVIGATION_ENGINE_INSTRUCTION_LIST = [
+"CLICK",
+"HOVER",
+]
+
+NAVIGATION_CONTROL_INSTRUCTION_LIST = [
+"BACK",
+"MAXIMIZE_WINDOW",
+"SCAN",
+"SCROLL_DOWN",
+"SCROLL_UP",
+"SWITCH_TAB",
+"WAIT",
+]
 
 NAVIGATION_ENGINE_PROMPT_TEMPLATE = ActionTemplate(
     """
@@ -275,7 +293,7 @@ class NavigationEngine(BaseEngine):
             try:
                 # We extract the action
                 action = self.extractor.extract(response)
-                self._verify_llm_reponse(response, llm_context)
+                self._verify_llm_reponse(action, llm_context)
                 action_outcome["action"] = action
                 action_full += action
 
@@ -414,6 +432,159 @@ class NavigationEngine(BaseEngine):
                         exception = HallucinatedException(xpath)
                     raise exception
 
+    def execute_action(self, action: str) -> ActionResult:
+        try:
+            # Get information to see which elements are selected
+            vision_data = self.driver.get_highlighted_element(action)
+            if self.display:
+                for item in vision_data:
+                    display_screenshot(item["screenshot"])
+                    time.sleep(0.2)
+            with time_profiler("Execute Code"):
+                self.driver.exec_code(action)
+            success = True
+        except Exception as e:
+            logging_print.error(f"Navigation error: {e}")
+            # action_outcome["success"] = False
+            # action_outcome["error"] = str(e)
+            if self.raise_on_error:
+                raise e
+            success = False
+
+        time.sleep(self.time_between_actions)
+        if self.display:
+            try:
+                screenshot = self.driver.get_screenshot_as_png()
+                screenshot = BytesIO(screenshot)
+                screenshot = Image.open(screenshot)
+                display_screenshot(screenshot)
+            except:
+                pass
+
+        return ActionResult(
+            instruction=action,
+            code=action,
+            success=success,
+            output=None,
+        )
+
+    def get_actions_from_instruction(
+        self,
+        instruction: str,
+        num_queries: int = 1,
+        max_actions: int = 1,
+        generation_config: dict = None
+    ) -> list[str]:
+        """
+        Extract action from `instruction` by querying an LLM with a prompt enriched with HTML elements from the page.
+        The LLM will be queried a maximum amount of time egal to `n_attempt` before giving up.
+        At each call, the LLM will return `num_queries` and will output all actions it found.
+
+        Args:
+        instruction (str): instruction
+        display (bool): whether or not to display the extraction
+        num_queries (int): number of queries the LLM will output
+        max_actions (int): maximum number of action to return
+        llm_option (dict): configuration of the LLM given to the LLM call
+
+        Returns:
+        list of actions (str)
+        """
+        if max_actions < num_queries:
+            logging.info(f'Asked for {max_actions} actions but the LLM is queried {num_queries}.')
+            logging.info(f'Setting the number of queries to be 2 * {max_actions}')
+            num_queries = 2*max_actions
+            
+        success = False
+        logging_print.debug("Query for retriever: " + instruction)
+        # Fetch HTML nodes
+        start = time.time()
+        source_nodes = self.get_nodes(instruction)
+        end = time.time()
+        retrieval_time = end - start
+
+        llm_context = "\n".join(source_nodes)
+        logger = self.logger
+
+        navigation_log = {
+            "navigation_engine_input": instruction,
+            "retrieved_html": source_nodes,
+            "retrieval_time": retrieval_time,
+            "retrieval_name": self.retriever.__class__.__name__,
+        }
+
+        # Fetch action
+        for _ in range(self.n_attempts):
+            if success:
+                break
+            start = time.time()
+            authorized_xpaths = extract_xpaths_from_html(llm_context)
+            prompt = self.prompt_template.format(
+                context_str=llm_context,
+                query_str=instruction,
+                authorized_xpaths=authorized_xpaths,
+            )
+
+            responses = []
+            with time_profiler("Navigation Engine Inference", prompt_size=len(prompt)):
+                for _ in range(num_queries):
+                    if len(responses) >= max_actions:
+                        break
+                    responses.append(
+                        self.llm.complete(
+                            prompt,
+                            generation_config=generation_config,
+                        ).text
+                    )
+
+            end = time.time()
+            action_generation_time = end - start
+
+        # Action extraction
+        actions = []
+        start = time.time()
+        for potential_action in responses:
+            try: 
+                action = self.extractor.extract(potential_action)
+                self._verify_llm_reponse(action, authorized_xpaths)
+
+                actions.append(str(action))
+                success = True
+            except Exception as e:
+                success = False
+                logging_print(f'Could not extract action from instructon: {instruction}')
+                if self.raise_on_error:
+                    raise e
+
+        end = time.time()
+        extraction_time = end - start
+
+        actions_outcome = {
+                "llm_raw_responses": responses,
+                "extracted_actions": actions,
+                "action_generation_time": action_generation_time,
+                "action_extraction_time": extraction_time,
+                "navigation_engine_full_prompt": prompt,
+                "navigation_engine_llm": get_model_name(self.llm),
+                "num_queries": num_queries,
+                "generation_config": generation_config
+        }
+        # Log
+        if logger:
+            log = {
+                'navigation_log': navigation_log,
+                'actions_outcome': actions_outcome
+            }
+            logger.add_log(log)
+
+        if len(actions) > 0:
+            success = True
+        else:
+            success = False
+            logging_print(f'Could not extract action from instructon: {instruction}')
+
+        return actions
+
     def execute_instruction(self, instruction: str) -> ActionResult:
         """
         Generates code and executes it to answer the instruction
@@ -425,112 +596,34 @@ class NavigationEngine(BaseEngine):
             `bool`: True if the code was executed without error
             `Any`: The output of navigation is always None
         """
-
         success = False
         action_full = ""
-        action_nb = 0
-        navigation_log_total = []
+        action_execution_log = dict({
+            "success": False,
+            "error": None,
+        })
 
-        logging_print.debug("Query for retriever: " + instruction)
-
-        start = time.time()
-        source_nodes = self.get_nodes(instruction)
-        end = time.time()
-        retrieval_time = end - start
-
-        llm_context = "\n".join(source_nodes)
-        success = False
         logger = self.logger
 
-        navigation_log = {
-            "navigation_engine_input": instruction,
-            "retrieved_html": source_nodes,
-            "retrieval_time": retrieval_time,
-            "retrieval_name": self.retriever.__class__.__name__,
-        }
+        actions = self.get_actions_from_instruction(instruction=instruction, max_actions=1)
+        action = actions[0]
 
-        action_outcomes = []
-        for _ in range(self.n_attempts):
-            if success:
-                break
-            if self.display:
-                try:
-                    scr_path = self.driver.get_current_screenshot_folder()
-                    lst = sort_files_by_creation(scr_path)
-                    for scr in lst:
-                        img = Image.open(scr_path.as_posix() + "/" + scr)
-                        display_screenshot(img)
-                        time.sleep(0.35)
-                except:
-                    pass
-            start = time.time()
-            authorized_xpaths = extract_xpaths_from_html(llm_context)
-            prompt = self.prompt_template.format(
-                context_str=llm_context,
-                query_str=instruction,
-                authorized_xpaths=authorized_xpaths,
-            )
-
-            with time_profiler("Navigation Engine Inference", prompt_size=len(prompt)):
-                response = self.llm.complete(prompt).text
-
-            end = time.time()
-            action_generation_time = end - start
-            action_outcome = {
-                "llm_raw_response": response,
-                "action_generation_time": action_generation_time,
-                "navigation_engine_full_prompt": prompt,
-                "navigation_engine_llm": get_model_name(self.llm),
-            }
-
-            try:
-                # We extract the action
-                action = self.extractor.extract(response)
-                self._verify_llm_reponse(response, authorized_xpaths)
-
-                action_outcome["action"] = action
-                action_full += action
-
-                # Get information to see which elements are selected
-                vision_data = self.driver.get_highlighted_element(action)
-                if self.display:
-                    for item in vision_data:
-                        display_screenshot(item["screenshot"])
-                        time.sleep(0.2)
-
-                with time_profiler("Execute Code"):
-                    self.driver.exec_code(action)
-                time.sleep(self.time_between_actions)
-                if self.display:
-                    try:
-                        screenshot = self.driver.get_screenshot_as_png()
-                        screenshot = BytesIO(screenshot)
-                        screenshot = Image.open(screenshot)
-                        display_screenshot(screenshot)
-                    except:
-                        pass
-                success = True
-                action_outcome["success"] = True
-                navigation_log["vision_data"] = vision_data
-            except Exception as e:
-                logging_print.error(f"Navigation error: {e}")
-                action_outcome["success"] = False
-                action_outcome["error"] = str(e)
-                if self.raise_on_error:
-                    raise e
-
-            action_outcomes.append(action_outcome)
-
-        navigation_log["action_outcomes"] = action_outcomes
-        navigation_log["action_nb"] = action_nb
-        action_nb += 1
-        navigation_log_total.append(navigation_log)
+        # Execute the action
+        try:
+            action_result = self.execute_action(action)
+            success = action_result.success
+        except Exception as e:
+            logging_print.error(f"Navigation error: {e}")
+            action_execution_log["success"] = False
+            action_execution_log["error"] = str(e)
+            if self.raise_on_error:
+                raise e
 
         if logger:
             log = {
                 "engine": "Navigation Engine",
                 "instruction": instruction,
-                "engine_log": navigation_log_total,
+                "action": action,
                 "success": success,
                 "output": None,
                 "code": action_full,
@@ -567,42 +660,63 @@ class NavigationControl(BaseEngine):
     def set_display(self, display: bool):
         self.display = display
 
-    def execute_instruction(self, instruction: str) -> ActionResult:
+    def check_instruction_correctness(self, instruction: str) -> Union[bool, str]:
+        """ Check if instruction is Navigation Engine instruction and returns it.
+        Args:
+            instruction (str): instruction in text format
+        
+        Return:
+            correctness (bool), action (str): tuple with extracted instruction
+        """
+        parsed_actions = []        
+        for instr in NAVIGATION_CONTROL_INSTRUCTION_LIST:
+            if instruction in instr:
+                parsed_actions.append(instr)
+        match len(parsed_actions):
+            case 0:
+                logging_print.info(f"Unknown instruction: {instruction}")
+                return False, ""
+            case 1:
+                return True, parsed_actions[0] # Return clean instruction
+            case _:
+                logging_print.info(f"Ambiguous instruction:  {instruction}")
+                return False, ""
+    
+    def execute_action(self, action: str) -> ActionResult:
         import inspect
-
         code = ""
         output = None
         success = True
         logger = self.logger
 
         try:
-            if "SCROLL_DOWN" in instruction:
+            if "SCROLL_DOWN" == action:
                 self.driver.scroll_down()
                 code = inspect.getsource(self.driver.scroll_down)
-            elif "SCROLL_UP" in instruction:
+            elif "SCROLL_UP" == action:
                 self.driver.scroll_up()
                 code = inspect.getsource(self.driver.scroll_up)
-            elif "WAIT" in instruction:
+            elif "WAIT" == action:
                 self.driver.wait(self.time_between_actions)
                 code = inspect.getsource(self.driver.wait)
-            elif "BACK" in instruction:
+            elif "BACK" == action:
                 self.driver.back()
                 code = inspect.getsource(self.driver.back)
-            elif "SCAN" in instruction:
+            elif "SCAN" == action:
                 self.driver.get_screenshots_whole_page()
                 code = inspect.getsource(self.driver.get_screenshots_whole_page)
-            elif "MAXIMIZE_WINDOW" in instruction:
+            elif "MAXIMIZE_WINDOW" == action:
                 self.driver.maximize_window()
                 code = inspect.getsource(self.driver.maximize_window)
-            elif "SWITCH_TAB" in instruction:
-                tab_id = int(instruction.split(" ")[1])
+            elif "SWITCH_TAB" == action:
+                tab_id = int(action.split(" ")[1])
                 try:
                     self.driver.switch_tab(tab_id=tab_id)
                 except Exception as e:
                     raise ValueError(f"Error while switching tab: {e}")
                 code = inspect.getsource(self.driver.switch_tab)
             else:
-                raise ValueError(f"Unknown instruction: {instruction}")
+                raise ValueError(f"Unknown action: {action}")
 
         except NavigationException as e:
             success = False
@@ -612,7 +726,7 @@ class NavigationControl(BaseEngine):
         if logger:
             log = {
                 "engine": "Navigation Controls",
-                "instruction": instruction,
+                "action": action,
                 "engine_log": None,
                 "success": success,
                 "output": output,
@@ -623,9 +737,24 @@ class NavigationControl(BaseEngine):
         self.driver.wait_for_idle()
 
         return ActionResult(
-            instruction=instruction, code=code, success=success, output=output
+            instruction=action, code=code, success=success, output=output
         )
 
+    def get_actions_from_instruction(
+        self, instruction: str, max_actions: int = 1, generation_config: dict = {}
+    ) -> list[str]:
+        actions = []
+        correctness, action = self.check_instruction_correctness(instruction=instruction)
+        if correctness:
+            actions.append(action)
+        return actions
+
+    def execute_instruction(self, instruction: str) -> ActionResult:
+        correctness, action = self.check_instruction_correctness(instruction=instruction)
+        if not correctness:
+            raise ValueError(f"Instruction not in list: {instruction}")
+
+        return self.execute_action(action)
 
 def get_model_name(llm: BaseLLM) -> str:
     try:

@@ -1,8 +1,9 @@
 from __future__ import annotations
-from typing import Dict, Optional
+from typing import Dict, Optional, NewType
 from llama_index.core import PromptTemplate
 from llama_index.core.base.llms.base import BaseLLM
 from llama_index.core.base.embeddings.base import BaseEmbedding
+
 from lavague.core.extractors import BaseExtractor, DynamicExtractor
 from lavague.core.retrievers import BaseHtmlRetriever, get_default_retriever
 from lavague.core.base_driver import BaseDriver
@@ -65,7 +66,8 @@ class ActionEngine:
             embedding = get_default_context().embedding
 
         if extraction_llm is None:
-            extraction_llm = get_default_context().extraction_llm
+            # extraction_llm = get_default_context().extraction_llm
+            extraction_llm = llm
 
         self.driver = driver
 
@@ -223,6 +225,16 @@ class ActionEngine:
                 ret.output,
             )
 
+    def get_actions(self,
+                    next_engine_name: str,
+                    instruction: str,
+                    n_actions: int) -> list[str]:
+        """
+        Return set of actions extracted from `instruction`.
+        """
+        next_engine = self.engines[next_engine_name]
+        return next_engine.get_actions(instruction, n_actions)
+
     def dispatch_instruction(
         self, next_engine_name: str, instruction: str
     ) -> ActionResult:
@@ -240,6 +252,18 @@ class ActionEngine:
 
         next_engine = self.engines[next_engine_name]
         return next_engine.execute_instruction(instruction)
+
+    def execute_action(
+        self, next_engine_name: str, action: str
+    ) -> ActionResult:
+        next_engine = self.engines[next_engine_name]
+        return next_engine.execute_action(action)
+
+    def get_actions_from_instruction(
+        self, next_engine_name: str, instruction: str, max_actions: int = 1, generation_config: dict = {}
+    ) -> list[str]:
+        next_engine = self.engines[next_engine_name]
+        return next_engine.get_actions_from_instruction(instruction, max_actions=max_actions, generation_config=generation_config)
 
     def get_llm_name(self):
         return get_model_name(self.python_engine.llm)

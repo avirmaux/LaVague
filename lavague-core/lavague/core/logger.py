@@ -1,6 +1,7 @@
 import uuid
 import pandas as pd
 import os
+from collections import defaultdict
 from PIL import Image
 import json
 import sqlite3
@@ -34,7 +35,7 @@ class AgentLogger:
 
     def new_run(self):
         self.run_id = str(uuid.uuid4())
-        self.current_row = {}
+        self.current_row = defaultdict(list)
         self.current_step = 0
 
     def end_step(self):
@@ -42,7 +43,7 @@ class AgentLogger:
         row["run_id"] = self.run_id
         row["step"] = self.current_step
         self.logs.append(row)
-        self.current_row = {}
+        self.current_row = defaultdict(list)
         self.current_step += 1
 
     def add_log(self, log: dict):

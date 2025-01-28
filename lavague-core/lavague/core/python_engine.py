@@ -19,10 +19,37 @@ from llama_index.multi_modal_llms.openai import OpenAIMultiModal
 from llama_index.core import Document, VectorStoreIndex
 from llama_index.core.base.llms.base import BaseLLM
 from llama_index.core.embeddings import BaseEmbedding
+from llama_index.core import PromptTemplate
+
 from lavague.core.extractors import DynamicExtractor
 
 DEFAULT_TEMPERATURE = 0.0
 
+PROMPT_ENGINE_TEMPLATE = PromptTemplate(
+"""
+Based on the context provided, you must respond to query with a YAML object in the following format:
+```yaml
+score: [a float value between 0 and 1 on your confidence that you have enough context to answer the question]
+ret: "[your answer]"
+```
+If you do not have sufficient context, set 'ret' to 'Insufficient context' and 'score' to 0.
+Keep the answer in 'ret' concise but informative.
+The query is: {instruction}
+"""
+)
+
+PROMPT_ENGINE_FALLBACK_TEMPLATE = PromptTemplate(
+"""
+You must respond with a JSON object in the following format:
+{{
+    "ret": "[any relevant text transcribed from the image in order to answer the query {instruction} - make sure to answer with full sentences so the reponse can be understood out of context.]",
+    "score": [a confidence score between 0 and 1 that the necessary context has been captured in order to answer the following query]
+}}
+If you believe the transcription is incomplete or lacks context, adjust the 'score' accordingly.
+
+When setting the score value - you can also take into account the following additional information from previous transcriptions {memory}
+"""
+)
 
 class PythonEngine(BaseEngine):
     """
@@ -38,7 +65,7 @@ class PythonEngine(BaseEngine):
     ocr_llm: BaseLLM
     batch_size: int
     confidence_threshold: float
-    fallback_theshold: float
+    fallback_threshold: float
     temp_screenshots_path: str
     n_search_attempts: int
 
@@ -72,7 +99,7 @@ class PythonEngine(BaseEngine):
         self.confidence_threshold = confidence_threshold
         self.temp_screenshots_path = temp_screenshots_path
         self.n_search_attempts = n_search_attemps
-        self.fallback_theshold = fallback_threshold
+        self.fallback_threshold = fallback_threshold
 
     @classmethod
     def from_context(cls, context: Context, driver: BaseDriver):
@@ -106,21 +133,14 @@ class PythonEngine(BaseEngine):
 
         return screenshot_paths
 
-    def perform_fallback(self, prompt, instruction) -> str:
-        memory = ""
+    def perform_fallback(self,
+                         instruction: str,
+                         memory: str = "",
+                         prompt_template: str = PROMPT_ENGINE_FALLBACK_TEMPLATE,
+                         ) -> str:
         context_score = -1
 
-        prompt = f"""
-        You must respond with a JSON object in the following format:
-        {{
-            "ret": "[any relevant text transcribed from the image in order to answer the query {instruction} - make sure to answer with full sentences so the reponse can be understood out of context.]",
-            "score": [a confidence score between 0 and 1 that the necessary context has been captured in order to answer the following query]
-        }}
-        If you believe the transcription is incomplete or lacks context, adjust the 'score' accordingly.
-
-        When setting the score value - you can also take into account the following additional information from previous transcriptions {memory}
-        """
-
+        prompt = prompt_template.format(instruction=instruction, memory=memory)
         for i in range(self.n_search_attempts):
             if context_score >= self.confidence_threshold:
                 break
@@ -167,7 +187,10 @@ class PythonEngine(BaseEngine):
             print(f"Error displaying screenshot: {e}")
             pass
 
-    def execute_instruction(self, instruction: str) -> ActionResult:
+    def execute_instruction(self,
+                            instruction: str,
+                            prompt_template=PROMPT_ENGINE_TEMPLATE
+                            ) -> ActionResult:
         logger = self.logger
 
         html = self.driver.get_html()
@@ -184,27 +207,20 @@ class PythonEngine(BaseEngine):
         index = VectorStoreIndex.from_documents(documents, embed_model=embedding)
         query_engine = index.as_query_engine(llm=llm)
 
-        prompt = f"""
-        Based on the context provided, you must respond to query with a YAML object in the following format:
-        ```yaml
-        score: [a float value between 0 and 1 on your confidence that you have enough context to answer the question]
-        ret: "[your answer]"
-        ```
-        If you do not have sufficient context, set 'ret' to 'Insufficient context' and 'score' to 0.
-        Keep the answer in 'ret' concise but informative.
-        The query is: {instruction}
-        """
+        prompt = prompt_template.format(instruction=instruction)
 
         output = query_engine.query(prompt).response.strip()
         output_dict = self.extract_structured_data(output)
 
+        print(output_dict)
+
         try:
             if (
-                output_dict.get("score", 0) < self.fallback_theshold
+                output_dict.get("score", 0) < self.fallback_threshold
             ):  # use fallback method
-                output = self.perform_fallback(prompt=prompt, instruction=instruction)
+                output = self.perform_fallback(instruction=instruction, prompt_template=prompt_template)
 
-            else:  # original navigatin engine method
+            else:  # original navigating engine method
                 output = output_dict.get("ret")
         except (SyntaxError, ValueError) as e:
             print("Error parsing the output:", e)
@@ -229,6 +245,12 @@ class PythonEngine(BaseEngine):
         return ActionResult(
             instruction=instruction, code="", success=success, output=output
         )
+
+    def execute_action(self, action: str) -> ActionResult:
+        return self.execute_instruction(action)
+
+    def get_actions_from_instruction(self, instruction: str, max_actions: int = 1, generation_config: dict = {}) -> ActionResult:
+        return [instruction]
 
     def set_display(self, display: bool):
         self.display = display

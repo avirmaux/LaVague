@@ -1,9 +1,8 @@
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Optional, NewType
 from lavague.core.display import Display
 from lavague.core.logger import Loggable
 from dataclasses import dataclass
-
 
 @dataclass
 class ActionResult:
@@ -20,4 +19,12 @@ class ActionResult:
 class BaseEngine(ABC, Loggable, Display):
     @abstractmethod
     def execute_instruction(self, instruction: str) -> ActionResult:
+        pass
+
+    @abstractmethod
+    def execute_action(self, action: str) -> ActionResult:
+        pass
+
+    @abstractmethod
+    def get_actions_from_instruction(self, action: str, max_actions: int, generation_config: dict = {}) -> list[str]:
         pass

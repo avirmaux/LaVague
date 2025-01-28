@@ -9,6 +9,12 @@ from lavague.core.world_model import WorldModel
 from lavague.core.utilities.version_checker import check_latest_version
 from lavague.core.action_engine import ActionEngine
 from lavague.core.agents import WebAgent
+from lavague.core.utilities.profiling import (
+    ChartGenerator,
+    time_profiler,
+    start_new_step,
+    clear_profiling_data,
+)
 
 import os
 import warnings

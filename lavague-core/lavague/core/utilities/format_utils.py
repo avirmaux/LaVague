@@ -128,6 +128,7 @@ def extract_world_model_instruction(text):
             else:
                 instruction_str = instruction_text
             # Update longest_instruction if the current one is longer
+            # Take first part of multi-task instruction
             if len(instruction_str) > len(longest_instruction):
                 longest_instruction = instruction_str
 
@@ -144,7 +145,8 @@ def replace_hyphens(text: str, replacement_char="•"):
 
 def extract_before_next_engine(text: str) -> str:
     # Define the patterns for "Next engine:" and similar patterns
-    next_engine_patterns = [r"Next engine:\s*", r"### Next Engine:\s*"]
+    next_engine_patterns = [r"Next engine:\s*",
+                            r"### Next Engine:\s*"]
 
     # Split the text using the "Next engine:" patterns
     for pattern in next_engine_patterns:
@@ -164,17 +166,20 @@ def extract_before_next_engine(text: str) -> str:
 def extract_next_engine(text: str, next_engines: List[str] = DEFAULT_ENGINES) -> str:
     # Use a regular expression to find the content after "Next engine:"
 
-    next_engine_patterns = [r"Next engine:\s*(.*)", r"### Next Engine:\s*(.*)"]
+    next_engine_patterns = [r"Next engine:\s*(.*)",
+                            r"### Next Engine:\s*(.*)",
+                            r"Next Engine(\S)*\s(.*)"]
 
     for pattern in next_engine_patterns:
         next_engine_match = re.search(pattern, text)
         if next_engine_match:
-            extracted_text = next_engine_match.group(1).strip()
-            # To avoid returning a non-existent engine
+            for group in next_engine_match.groups():
+                extracted_text = group.strip()
+                # To avoid returning a non-existent engine
 
-            for engine in next_engines:
-                if engine.lower() in extracted_text.lower():
-                    return engine
+                for engine in next_engines:
+                    if engine.lower() in extracted_text.lower():
+                        return engine
 
     raise ValueError(f"No next engine found in the text: {text}")
 
