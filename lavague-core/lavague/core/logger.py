@@ -50,6 +50,10 @@ class AgentLogger:
         for k, v in log.items():
             self.current_row[k] = v
 
+    def add_log_end_step(self, log:dict):
+        self.add_log(log)
+        self.end_step()
+
     def return_pandas(self) -> pd.DataFrame:
         df = pd.DataFrame(self.logs)
         return df
